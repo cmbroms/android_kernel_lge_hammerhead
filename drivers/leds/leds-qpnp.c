@@ -1165,25 +1165,6 @@ static int rgb_duration_config(struct qpnp_led_data *led)
 	unsigned long ramp_step_ms, num_duty_pcts;
 	struct pwm_config_data  *pwm_cfg = led->rgb_cfg->pwm_cfg;
 
-	#if 1
-	char *ledstr = "unknown";
-	switch (led->id) {
-	case QPNP_ID_RGB_RED:
-		ledstr = "red";
-		break;
-	case QPNP_ID_RGB_GREEN:
-		ledstr = "green";
-		break;
-	case QPNP_ID_RGB_BLUE:
-		ledstr = "blue";
-		break;
-	default:
-		break;
-	}
-	dev_err(&led->spmi_dev->dev, "in rgb_duration_config for %s led, on_ms=%lu, off_ms=%lu, brightness=%d\n",
-		ledstr, on_ms, off_ms, led->cdev.brightness);
-	#endif
-
 	if (!on_ms) {
 		return -EINVAL;
 	} else if (!off_ms) {
@@ -1200,8 +1181,6 @@ static int rgb_duration_config(struct qpnp_led_data *led)
 			led->rgb_cfg->calibrated_max *
 			100) /
 			(RGB_MAX_LEVEL * RGB_MAX_LEVEL);
-		dev_err(&led->spmi_dev->dev, "setting single duty cycle entry of %d\n",
-			pwm_cfg->duty_cycles->duty_pcts[0]);
 	} else {
 		ramp_step_ms = on_ms / 20;
 		ramp_step_ms = (ramp_step_ms < 5)? 5 : ramp_step_ms;

@@ -223,14 +223,8 @@ enum usb_vdd_value {
  * @enable_sec_phy: Use second HSPHY with USB2 core
  * @bus_scale_table: parameters for bus bandwidth requirements
  * @mhl_dev_name: MHL device name used to register with MHL driver.
- * @log2_itc: value of 2^(log2_itc-1) will be used as the
- *              interrupt threshold (ITC), when log2_itc is
- *              between 1 to 7.
- * @l1_supported: enable link power management support.
  * @dpdm_pulldown_added: Indicates whether pull down resistors are
- *		connected on data lines or not.
- * @enable_ahb2ahb_bypass: Indicates whether enable AHB2AHB BYPASS
- *		mode with controller in device mode.
+		connected on data lines or not.
  */
 struct msm_otg_platform_data {
 	int *phy_init_seq;
@@ -256,10 +250,7 @@ struct msm_otg_platform_data {
 	bool enable_sec_phy;
 	struct msm_bus_scale_pdata *bus_scale_table;
 	const char *mhl_dev_name;
-	int log2_itc;
-	bool l1_supported;
 	bool dpdm_pulldown_added;
-	bool enable_ahb2ahb_bypass;
 };
 
 /* phy related flags */
@@ -314,6 +305,7 @@ struct msm_otg_platform_data {
  * @async_irq: IRQ number used by some controllers during low power state
  * @clk: clock struct of alt_core_clk.
  * @pclk: clock struct of iface_clk.
+ * @phy_reset_clk: clock struct of phy_clk.
  * @core_clk: clock struct of core_bus_clk.
  * @sleep_clk: clock struct of sleep_clk for USB PHY.
  * @core_clk_rate: core clk max frequency
@@ -350,6 +342,7 @@ struct msm_otg {
 	struct clk *xo_clk;
 	struct clk *clk;
 	struct clk *pclk;
+	struct clk *phy_reset_clk;
 	struct clk *core_clk;
 	struct clk *sleep_clk;
 	long core_clk_rate;
@@ -440,18 +433,6 @@ struct msm_otg {
 	unsigned int online;
 	unsigned int host_mode;
 	unsigned int current_max;
-};
-
-struct ci13xxx_platform_data {
-	u8 usb_core_id;
-	/*
-	 * value of 2^(log2_itc-1) will be used as the interrupt threshold
-	 * (ITC), when log2_itc is between 1 to 7.
-	 */
-	int log2_itc;
-	void *prv_data;
-	bool l1_supported;
-	bool enable_ahb2ahb_bypass;
 };
 
 struct msm_hsic_host_platform_data {

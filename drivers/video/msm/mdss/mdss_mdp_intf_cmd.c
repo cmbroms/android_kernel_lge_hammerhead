@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -198,12 +198,14 @@ static int mdss_mdp_cmd_tearcheck_setup(struct mdss_mdp_ctl *ctl, int enable)
 static inline void mdss_mdp_cmd_clk_on(struct mdss_mdp_cmd_ctx *ctx)
 {
 	unsigned long flags;
+	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
 	mutex_lock(&ctx->clk_mtx);
 	if (!ctx->clk_enabled) {
 		ctx->clk_enabled = 1;
 		mdss_mdp_ctl_intf_event
 			(ctx->ctl, MDSS_EVENT_PANEL_CLK_CTRL, (void *)1);
 		mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_ON, false);
+		mdss_mdp_hist_intr_setup(&mdata->hist_intr, MDSS_IRQ_RESUME);
 	}
 	spin_lock_irqsave(&ctx->clk_lock, flags);
 	if (!ctx->rdptr_enabled)
@@ -216,6 +218,7 @@ static inline void mdss_mdp_cmd_clk_on(struct mdss_mdp_cmd_ctx *ctx)
 static inline void mdss_mdp_cmd_clk_off(struct mdss_mdp_cmd_ctx *ctx)
 {
 	unsigned long flags;
+	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
 	int set_clk_off = 0;
 
 	mutex_lock(&ctx->clk_mtx);
@@ -226,6 +229,7 @@ static inline void mdss_mdp_cmd_clk_off(struct mdss_mdp_cmd_ctx *ctx)
 
 	if (ctx->clk_enabled && set_clk_off) {
 		ctx->clk_enabled = 0;
+		mdss_mdp_hist_intr_setup(&mdata->hist_intr, MDSS_IRQ_SUSPEND);
 		mdss_mdp_ctl_intf_event
 			(ctx->ctl, MDSS_EVENT_PANEL_CLK_CTRL, (void *)0);
 		mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_OFF, false);
@@ -391,7 +395,7 @@ static int mdss_mdp_cmd_remove_vsync_handler(struct mdss_mdp_ctl *ctl,
 	return 0;
 }
 
-int mdss_mdp_cmd_reconfigure_splash_done(struct mdss_mdp_ctl *ctl)
+int mdss_mdp_cmd_reconfigure_splash_done(struct mdss_mdp_ctl *ctl, bool handoff)
 {
 	struct mdss_panel_data *pdata;
 	int ret = 0;
@@ -399,9 +403,6 @@ int mdss_mdp_cmd_reconfigure_splash_done(struct mdss_mdp_ctl *ctl)
 	pdata = ctl->panel_data;
 
 	pdata->panel_info.cont_splash_enabled = 0;
-
-	ret = mdss_mdp_ctl_intf_event(ctl, MDSS_EVENT_CONT_SPLASH_FINISH,
-			NULL);
 
 	mdss_mdp_ctl_intf_event(ctl, MDSS_EVENT_PANEL_CLK_CTRL, (void *)0);
 	mdss_mdp_clk_ctrl(MDP_BLOCK_POWER_OFF, false);
@@ -415,7 +416,6 @@ static int mdss_mdp_cmd_wait4pingpong(struct mdss_mdp_ctl *ctl, void *arg)
 	unsigned long flags;
 	int need_wait = 0;
 	int rc = 0;
-	int flush_wq = (int) arg;
 
 	ctx = (struct mdss_mdp_cmd_ctx *) ctl->priv_data;
 	if (!ctx) {
@@ -445,9 +445,22 @@ static int mdss_mdp_cmd_wait4pingpong(struct mdss_mdp_ctl *ctl, void *arg)
 		}
 	}
 
-	if (flush_wq)
-		flush_work_sync(&ctx->pp_done_work);
+	return rc;
+}
 
+static int mdss_mdp_cmd_set_partial_roi(struct mdss_mdp_ctl *ctl)
+{
+	int rc = 0;
+	if (ctl->roi.w && ctl->roi.h && ctl->roi_changed &&
+			ctl->panel_data->panel_info.partial_update_enabled) {
+		ctl->panel_data->panel_info.roi_x = ctl->roi.x;
+		ctl->panel_data->panel_info.roi_y = ctl->roi.y;
+		ctl->panel_data->panel_info.roi_w = ctl->roi.w;
+		ctl->panel_data->panel_info.roi_h = ctl->roi.h;
+
+		rc = mdss_mdp_ctl_intf_event(ctl,
+				MDSS_EVENT_ENABLE_PARTIAL_UPDATE, NULL);
+	}
 	return rc;
 }
 
@@ -473,12 +486,14 @@ int mdss_mdp_cmd_kickoff(struct mdss_mdp_ctl *ctl, void *arg)
 		WARN(rc, "intf %d panel on error (%d)\n", ctl->intf_num, rc);
 	}
 
+	mdss_mdp_cmd_set_partial_roi(ctl);
+
+	mdss_mdp_cmd_clk_on(ctx);
+
 	/*
 	 * tx dcs command if had any
 	 */
 	mdss_mdp_ctl_intf_event(ctl, MDSS_EVENT_DSI_CMDLIST_KOFF, NULL);
-
-	mdss_mdp_cmd_clk_on(ctx);
 
 	INIT_COMPLETION(ctx->pp_comp);
 	mdss_mdp_irq_enable(MDSS_MDP_IRQ_PING_PONG_COMP, ctx->pp_num);
@@ -523,11 +538,9 @@ int mdss_mdp_cmd_stop(struct mdss_mdp_ctl *ctl)
 	if (cancel_work_sync(&ctx->clk_work))
 		pr_debug("no pending clk work\n");
 
-	mdss_mdp_cmd_wait4pingpong(ctl, NULL);
-
 	mdss_mdp_cmd_clk_off(ctx);
 
-	flush_work_sync(&ctx->pp_done_work);
+	flush_work(&ctx->pp_done_work);
 
 	ctx->panel_on = 0;
 

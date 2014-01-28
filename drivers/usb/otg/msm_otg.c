@@ -362,8 +362,6 @@ static int ulpi_read(struct usb_phy *phy, u32 reg)
 	if (cnt >= ULPI_IO_TIMEOUT_USEC) {
 		dev_err(phy->dev, "ulpi_read: timeout %08x\n",
 			readl(USB_ULPI_VIEWPORT));
-		dev_err(phy->dev, "PORTSC: %08x USBCMD: %08x\n",
-			readl_relaxed(USB_PORTSC), readl_relaxed(USB_USBCMD));
 		return -ETIMEDOUT;
 	}
 	return ULPI_DATA_READ(readl(USB_ULPI_VIEWPORT));
@@ -389,8 +387,6 @@ static int ulpi_write(struct usb_phy *phy, u32 val, u32 reg)
 
 	if (cnt >= ULPI_IO_TIMEOUT_USEC) {
 		dev_err(phy->dev, "ulpi_write: timeout\n");
-		dev_err(phy->dev, "PORTSC: %08x USBCMD: %08x\n",
-			readl_relaxed(USB_PORTSC), readl_relaxed(USB_USBCMD));
 		return -ETIMEDOUT;
 	}
 	return 0;
@@ -463,33 +459,45 @@ static int msm_otg_link_clk_reset(struct msm_otg *motg, bool assert)
 	return ret;
 }
 
+static int msm_otg_phy_clk_reset(struct msm_otg *motg)
+{
+	int ret;
+
+	if (IS_ERR(motg->phy_reset_clk))
+		return 0;
+
+	ret = clk_reset(motg->phy_reset_clk, CLK_RESET_ASSERT);
+	if (ret) {
+		dev_err(motg->phy.dev, "usb phy clk assert failed\n");
+		return ret;
+	}
+	usleep_range(10000, 12000);
+	ret = clk_reset(motg->phy_reset_clk, CLK_RESET_DEASSERT);
+	if (ret)
+		dev_err(motg->phy.dev, "usb phy clk deassert failed\n");
+	return ret;
+}
+
 static int msm_otg_phy_reset(struct msm_otg *motg)
 {
 	u32 val;
 	int ret;
+	int retries;
 	struct msm_otg_platform_data *pdata = motg->pdata;
-
-	/*
-	 * AHB2AHB Bypass mode shouldn't be enable before doing
-	 * async clock reset. If it is enable, disable the same.
-	 */
-	val = readl_relaxed(USB_AHBMODE);
-	if (val & AHB2AHB_BYPASS) {
-		pr_err("%s(): AHB2AHB_BYPASS SET: AHBMODE:%x\n",
-				__func__, val);
-		val &= ~AHB2AHB_BYPASS_BIT_MASK;
-		writel_relaxed(val | AHB2AHB_BYPASS_CLEAR, USB_AHBMODE);
-		pr_err("%s(): AHBMODE: %x\n", __func__,
-				readl_relaxed(USB_AHBMODE));
-	}
 
 	ret = msm_otg_link_clk_reset(motg, 1);
 	if (ret)
 		return ret;
+	ret = msm_otg_phy_clk_reset(motg);
+	if (ret)
+		return ret;
 
-	/* wait for 1ms delay as suggested in HPG. */
-	usleep_range(1000, 1200);
-
+	/*
+	 * 10 usec delay is required according to spec. Using larger value
+	 * since the exact value proved to not work 100% of the time.
+	 */
+	if (IS_ERR(motg->phy_reset_clk))
+		usleep_range(100, 120);
 	ret = msm_otg_link_clk_reset(motg, 0);
 	if (ret)
 		return ret;
@@ -499,6 +507,34 @@ static int msm_otg_phy_reset(struct msm_otg *motg)
 							USB_PHY_CTRL2);
 	val = readl(USB_PORTSC) & ~PORTSC_PTS_MASK;
 	writel(val | PORTSC_PTS_ULPI, USB_PORTSC);
+
+	for (retries = 3; retries > 0; retries--) {
+		ret = ulpi_write(&motg->phy, ULPI_FUNC_CTRL_SUSPENDM,
+				ULPI_CLR(ULPI_FUNC_CTRL));
+		if (!ret)
+			break;
+		ret = msm_otg_phy_clk_reset(motg);
+		if (ret)
+			return ret;
+	}
+	if (!retries)
+		return -ETIMEDOUT;
+
+	/* This reset calibrates the phy, if the above write succeeded */
+	ret = msm_otg_phy_clk_reset(motg);
+	if (ret)
+		return ret;
+
+	for (retries = 3; retries > 0; retries--) {
+		ret = ulpi_read(&motg->phy, ULPI_DEBUG);
+		if (ret != -ETIMEDOUT)
+			break;
+		ret = msm_otg_phy_clk_reset(motg);
+		if (ret)
+			return ret;
+	}
+	if (!retries)
+		return -ETIMEDOUT;
 
 	dev_info(motg->phy.dev, "phy_reset: success\n");
 	return 0;
@@ -529,32 +565,6 @@ static int msm_otg_link_reset(struct msm_otg *motg)
 		writel_relaxed(readl_relaxed(USB_PHY_CTRL2) | (1<<16),
 								USB_PHY_CTRL2);
 	return 0;
-}
-
-static void usb_phy_reset(struct msm_otg *motg)
-{
-	u32 val;
-
-	if (motg->pdata->phy_type != SNPS_28NM_INTEGRATED_PHY)
-		return;
-
-	/* Assert USB PHY_PON */
-	val =  readl_relaxed(USB_PHY_CTRL);
-	val &= ~PHY_POR_BIT_MASK;
-	val |= PHY_POR_ASSERT;
-	writel_relaxed(val, USB_PHY_CTRL);
-
-	/* wait for minimum 10 microseconds as suggested in HPG. */
-	usleep_range(10, 15);
-
-	/* Deassert USB PHY_PON */
-	val =  readl_relaxed(USB_PHY_CTRL);
-	val &= ~PHY_POR_BIT_MASK;
-	val |= PHY_POR_DEASSERT;
-	writel_relaxed(val, USB_PHY_CTRL);
-
-	/* Ensure that RESET operation is completed. */
-	mb();
 }
 
 static int msm_otg_reset(struct usb_phy *phy)
@@ -591,20 +601,12 @@ static int msm_otg_reset(struct usb_phy *phy)
 		dev_err(phy->dev, "link reset failed\n");
 		return ret;
 	}
-
 	msleep(100);
 
-	/* Reset USB PHY after performing USB Link RESET */
-	usb_phy_reset(motg);
-
-	/* Program USB PHY Override registers. */
 	ulpi_init(motg);
 
-	/*
-	 * It is recommended in HPG to reset USB PHY after programming
-	 * USB PHY Override registers.
-	 */
-	usb_phy_reset(motg);
+	/* Ensure that RESET operation is completed before turning off clock */
+	mb();
 
 	if (!IS_ERR(motg->clk))
 		clk_disable_unprepare(motg->clk);
@@ -2820,9 +2822,6 @@ static void msm_otg_sm_work(struct work_struct *w)
 			if (TA_WAIT_BCON > 0)
 				msm_otg_start_timer(motg, TA_WAIT_BCON,
 					A_WAIT_BCON);
-
-			/* Clear BSV in host mode */
-			clear_bit(B_SESS_VLD, &motg->inputs);
 			msm_otg_start_host(otg, 1);
 			msm_chg_enable_aca_det(motg);
 			msm_chg_disable_aca_intr(motg);
@@ -3731,8 +3730,6 @@ static struct platform_device *msm_otg_add_pdev(
 	const struct resource *res = ofdev->resource;
 	unsigned int num = ofdev->num_resources;
 	int retval;
-	struct ci13xxx_platform_data ci_pdata;
-	struct msm_otg_platform_data *otg_pdata;
 
 	pdev = platform_device_alloc(name, -1);
 	if (!pdev) {
@@ -3745,21 +3742,6 @@ static struct platform_device *msm_otg_add_pdev(
 
 	if (num) {
 		retval = platform_device_add_resources(pdev, res, num);
-		if (retval)
-			goto error;
-	}
-
-	if (!strcmp(name, "msm_hsusb")) {
-		otg_pdata =
-			(struct msm_otg_platform_data *)
-				ofdev->dev.platform_data;
-		ci_pdata.log2_itc = otg_pdata->log2_itc;
-		ci_pdata.usb_core_id = 0;
-		ci_pdata.l1_supported = otg_pdata->l1_supported;
-		ci_pdata.enable_ahb2ahb_bypass =
-				otg_pdata->enable_ahb2ahb_bypass;
-		retval = platform_device_add_data(pdev, &ci_pdata,
-			sizeof(ci_pdata));
 		if (retval)
 			goto error;
 	}
@@ -3913,8 +3895,6 @@ struct msm_otg_platform_data *msm_otg_dt_to_pdata(struct platform_device *pdev)
 				"qcom,dp-manual-pullup");
 	pdata->enable_sec_phy = of_property_read_bool(node,
 					"qcom,usb2-enable-hsphy2");
-	of_property_read_u32(node, "qcom,hsusb-log2-itc",
-				&pdata->log2_itc);
 
 	of_property_read_u32(node, "qcom,hsusb-otg-mpm-dpsehv-int",
 				&pdata->mpm_dpshv_int);
@@ -3923,11 +3903,6 @@ struct msm_otg_platform_data *msm_otg_dt_to_pdata(struct platform_device *pdev)
 	pdata->pmic_id_irq = platform_get_irq_byname(pdev, "pmic_id_irq");
 	if (pdata->pmic_id_irq < 0)
 		pdata->pmic_id_irq = 0;
-
-	pdata->l1_supported = of_property_read_bool(node,
-				"qcom,hsusb-l1-supported");
-	pdata->enable_ahb2ahb_bypass = of_property_read_bool(node,
-				"qcom,ahb-async-bridge-bypass");
 
 	return pdata;
 }
@@ -3954,7 +3929,6 @@ static int __init msm_otg_probe(struct platform_device *pdev)
 		if (!pdata->bus_scale_table)
 			dev_dbg(&pdev->dev, "bus scaling is disabled\n");
 
-		pdev->dev.platform_data = pdata;
 		ret = msm_otg_setup_devices(pdev, pdata->mode, true);
 		if (ret) {
 			dev_err(&pdev->dev, "devices setup failed\n");
@@ -4011,6 +3985,11 @@ static int __init msm_otg_probe(struct platform_device *pdev)
 
 	/* initialize reset counter */
 	motg->reset_counter = 0;
+
+	/* Some targets don't support PHY clock. */
+	motg->phy_reset_clk = clk_get(&pdev->dev, "phy_clk");
+	if (IS_ERR(motg->phy_reset_clk))
+		dev_err(&pdev->dev, "failed to get phy_clk\n");
 
 	/*
 	 * Targets on which link uses asynchronous reset methodology,
@@ -4390,6 +4369,8 @@ put_core_clk:
 put_clk:
 	if (!IS_ERR(motg->clk))
 		clk_put(motg->clk);
+	if (!IS_ERR(motg->phy_reset_clk))
+		clk_put(motg->phy_reset_clk);
 devote_bus_bw:
 	if (motg->bus_perf_client) {
 		msm_otg_bus_vote(motg, USB_NO_PERF_VOTE);
@@ -4482,6 +4463,8 @@ static int __devexit msm_otg_remove(struct platform_device *pdev)
 	iounmap(motg->regs);
 	pm_runtime_set_suspended(&pdev->dev);
 
+	if (!IS_ERR(motg->phy_reset_clk))
+		clk_put(motg->phy_reset_clk);
 	clk_put(motg->pclk);
 	if (!IS_ERR(motg->clk))
 		clk_put(motg->clk);
